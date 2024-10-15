@@ -1,0 +1,217 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+### Chargement du package DADA2
+
+```{r, message=FALSE, warning=FALSE}
+library(dada2)
+```
+
+### Importation des données dans un objet "path"
+
+```{r, message=FALSE, warning=FALSE}
+path <- "/home/rstudio/DADA2/MiSeq_SOP"
+list.files(path)
+```
+
+### Regroupement des séquences forward et reverse
+
+```{r, message=FALSE, warning=FALSE}
+fnFs <- sort(list.files(path, pattern= "_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern= "_R2_001.fastq", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+plotQualityProfile(fnFs[1:2])
+```
+
+##### Graphique représentant les profils de qualité des séquences forward des deux premiers échantillons.
+
+Il est possible de voir que le score de qualité diminue pour les 10 dernières bases des séquences, pour les deux échantillons. 
+
+```{r, message=FALSE, warning=FALSE}
+plotQualityProfile(fnRs[1:2])
+```
+
+##### Graphique représentant les profils de qualité des séquences reverse des deux premiers échantillons.
+
+Il est possible de voir que le score de qualité diminue fortement à partir d'environ la 160ème base pour les séquences des deux échantillons.
+
+### Création d'un nouveau dossier "filtered" dans le directory et filtration des séquences
+
+```{r, message=FALSE, warning=FALSE }
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240, 160), maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE, compress = TRUE, multithread = TRUE)
+
+head(out)
+```
+
+Ici, les séquences vont être filtrées selon plusieurs critères qui doivent affinés si un nombre trop impotant de séquences est enlevé du jeu de données. D'abord, la partie des séquences où le score de qualité a diminué, comme vu ci-dessus, va être supprimée. Les séquences forward vont être réduites à 240 bases, et les reverse à 160 bases. Toutes les séquences contenant un nucléotide N (maxN = 0) ou une base avec un score de qualité égal ou inférieur à 2 (truncQ = 2) seront enlevées du jeu de données. Les séquences forward et reverse pour lesquelles le nombre d'erreurs attendues calculé est supérieur à 2 seront également enlevées (maxEE = c(2,2)). Enfin, si une séquence match avec le génome de phiX, elle sera aussi supprimée (rm.phix = TRUE).
+L'objet "out" contient le nombre de séquences avant et après filtration pour chaque échantillon.
+
+### Apprentissage des taux d'erreurs
+
+```{r, message=FALSE, warning=FALSE}
+errF <- learnErrors(filtFs, multithread = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE)
+
+plotErrors(errF, nominalQ = TRUE)
+```
+
+La fonction "learnErrors" permet de déterminer le taux d'erreur observé pour chaque transition de base possible en fonction du score de qualité dans le jeu de données. L'algorithme va alors calculer une estimation de chaque taux d'erreur (ligne noire) qui est censée suivre les taux observés. La ligne rouge correspond à la modélisation des erreurs attendues pour chaque score de qualité. Il est possible de voir que plus le score de qualité est élevé, plus le taux d'erreur est faible, sauf pour les transitions d'une base à une même base où il est maximal car plus le score de qualité est élevé plus la probabilité d'obtenir la même base est élevée. Seulement cette probabilité est ici modélisée comme une fréquence d'erreur. 
+
+### Correction des erreurs et détection des vrais variants
+
+```{r, message=FALSE, warning=FALSE}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+
+dadaFs[[1]]
+```
+
+La fonction "dada" va alors utiliser le modèle d'erreur ci-dessus afin de corriger les erreurs de séquençage et détecter les vrais variants dans chaque échantillon. L'algorithme a détecté 1979 séquences uniques dans l'échantillon 1, dont 128 correspondent à des vrais variants.
+
+### Alignement et fusion des séquences forward et reverse
+
+```{r, message=FALSE, warning=FALSE}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+head(mergers[[1]])
+```
+
+La fonction "mergePairs" permet d'aligner le complément-inverse des séquences reverse avec les séquences forward, avant de les fusionner pour obtenir la séquence d'intérêt entière. La séquence fusionner sera conservée dans le jeu de données uniquement si la zone de chevauchement entre les séquences forward et reverse est identique, et si cette zone est de minimum 12 bases (ces paramètres peuvent être modifiés). 
+Ici le data.frame montre que dans le premier échantillon il y a 127 séquences différentes, c'est-à-dire un variant de moins qu'à l'étape d'avant. L'abondance de chacune d'elle dans l'échantillon est également indiquée. 
+
+### Construction d'une table d'observation
+
+```{r, message=FALSE, warning=FALSE}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+
+La fonction "makeSequenceTable" permet de créer une table d'observation des différents variants. La fonction "dim" permet de voir le nombres de lignes et de colonnes de cette table, respectivement 20 et 293 ici. Il y a donc 293 variants différents qui ont été identifiés en tout dans le jeu de données. 
+
+```{r, message=FALSE, warning=FALSE}
+table(nchar(getSequences(seqtab)))
+```
+
+Ce code permet de voir la longueur de la séquence pour chaque variant. Il est possible de voir qu'elles tombent toutes dans la gamme de longueur pour la region V4 de l'ARN 16S. 
+
+### Elimination des chimères
+
+```{r, message=FALSE, warning=FALSE}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method = "consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+```
+```{r, message=FALSE, warning=FALSE}
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+Ce chiffre correspond à la fraction de toutes les séquences fusionnées qui n'étaient pas des chimères, c'est-à-dire 96%. A ne pas confondre avec le pourcentage de variants du jeu de données qui étaient des chimères.
+
+### Tableau récapitulatif du nombre de séquences enlevées à chaque étape
+
+```{r, message=FALSE, warning=FALSE}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+
+Ce tableau résume le nombre de séquences enlevées à chaque étape du pipeline pour l'ensemble des échantillons. La majorité des séquences ont été gardées.
+
+### Taxonomie
+
+```{r, message=FALSE, warning=FALSE}
+taxa <- assignTaxonomy(seqtab.nochim, "silva_nr99_v138.1_train_set.fa.gz", multithread=TRUE)
+taxa.print <- taxa
+row.names(taxa.print) <- NULL
+head(taxa.print)
+```
+
+Ici, la fonction assignTaxonomy permet, à partir d'une base de données taxonomiques, d'attribuer une taxonomie à chaque séquence du jeu de données. Ici on peut voir que pour la plupart des séquences, la taxonomie attribuée s'arrête à la famille. 
+
+### Précision de l'analyse
+
+```{r, message=FALSE, warning=FALSE}
+unqs.mock <- seqtab.nochim["Mock",]
+unqs.mock <- sort(unqs.mock[unqs.mock>0], decreasing=TRUE)
+cat("DADA2 inferred", length(unqs.mock), "sample sequences present in the Mock community.\n")
+```
+```{r, message=FALSE, warning=FALSE}
+mock.ref <- getSequences(file.path(path, "HMP_MOCK.v35.fasta"))
+match.ref <- sum(sapply(names(unqs.mock), function(x) any(grepl(x, mock.ref))))
+cat("Of those,", sum(match.ref), "were exact matches to the expected reference sequences.\n")
+```
+
+La communauté mock est une communauté de référence dont toutes les séquences sont connues, à laquelle les échantillons vont être comparés afin d'évaluer la qualité du séquençage et de la pipeline d'analyse. Ici, il est possible de voir que les 20 séquences de la communauté mock analysées avec la pipeline DADA2 match avec les séquences de références attendues. Cela indique que l'analyse et le séquençage sont qualitatifs. 
+
+### Partie bonus phyloseq
+
+```{r, message=FALSE, warning=FALSE}
+library(phyloseq)
+library(ggplot2)
+library(Biostrings)
+```
+
+```{r}
+samples.out <- rownames(seqtab.nochim)
+subject <- sapply(strsplit(samples.out, "D"), `[`, 1)
+gender <- substr(subject,1,1)
+subject <- substr(subject,2,999)
+day <- as.integer(sapply(strsplit(samples.out, "D"), `[`, 2))
+samdf <- data.frame(Subject=subject, Gender=gender, Day=day)
+samdf$When <- "Early"
+samdf$When[samdf$Day>100] <- "Late"
+rownames(samdf) <- samples.out
+```
+
+```{r}
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               sample_data(samdf), 
+               tax_table(taxa))
+ps <- prune_samples(sample_names(ps) != "Mock", ps) 
+```
+
+```{r}
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+```
+
+Phyloseq permet de créer plusieurs objets à partir des données produites avec DADA2, notamment une table d'OTU, une table de taxonomie, un objet contenant l'ensemble des séquences et un tableau de métadonnées.
+
+#### Visualisation de la diversité alpha
+
+```{r, message=FALSE, warning=FALSE}
+plot_richness(ps, x="Day", measures=c("Shannon", "Simpson"), color="When")
+```
+
+Ce graphique montre la diversité alpha, ou biodiversité, des échantillons en fonction du nombre de jour après le sevrage des souris. Il est possible de voir qu'il n'y a aucune différence de biodiversité flagrante entre les échantillons Early et Late.
+
+```{r}
+ps.prop <- transform_sample_counts(ps, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+```
+
+```{r}
+plot_ordination(ps.prop, ord.nmds.bray, color="When", title="Bray NMDS")
+```
+
+L'ordination réalisée ici permet par contre d'observer une différence entre les échantillons Late et Early. En effet, avec l'ordination, plus deux points sont distants plus ils sont dissimilaires. Il est également possible de voir que les échantillons Early sont moins homogènes en terme de diversité que les échantillons Late.
+
+```{r}
+top20 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:20]
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.top20 <- prune_taxa(top20, ps.top20)
+plot_bar(ps.top20, x="Day", fill="Family") + facet_wrap(~When, scales="free_x")
+```
+
+Ce barplot prend en compte les 20 séquences les plus représentées. Il permet de voir qu'il y a une différence en terme d'abondance entre les échantillons Early et Late mais que la diversité n'est pas extrêmement différente. 
